@@ -26,7 +26,7 @@ canvas{display:block;width:100%;height:100%;image-rendering:auto}
 <div class="wrap">
 <canvas id="c"></canvas>
 <div class="hud" id="hud">0</div>
-<div class="controls-hint">← → ou A/D · Mobile : incliner pour bouger, toucher pour tirer</div>
+<div class="controls-hint">← → ou A/D · Mobile : incliner pour bouger, taper pour tirer</div>
 <div class="overlay" id="startScreen">
 <h1>🟢 Doodle Jump</h1>
 <div class="sub">Saute de plateforme en plateforme !</div>
@@ -267,27 +267,25 @@ function update(dt) {
   if(dead) return;
   const t = dt / 16.667; // normalize to ~60fps
 
-  // Input - Gyroscope tilt for mobile OR keyboard
-  if(gyroEnabled) {
-    // gyroGamma: negative = tilt left, positive = tilt right
-    // Dead zone of ~2 degrees to avoid drift
+  // Input - Gyroscope OR keyboard/touch buttons
+  if(gyroEnabled && isMobile) {
+    // Gyroscope active: use tilt
     const deadZone = 2;
-    const maxTilt = 30; // max meaningful tilt angle
+    const maxTilt = 30;
     let tilt = gyroGamma;
-    // Clamp
     tilt = Math.max(-maxTilt, Math.min(maxTilt, tilt));
     if(Math.abs(tilt) < deadZone) tilt = 0;
     else tilt = (tilt - Math.sign(tilt) * deadZone) / (maxTilt - deadZone);
     tilt = Math.max(-1, Math.min(1, tilt));
-    // Apply with slight smoothing
     const targetVx = tilt * MOVE_SPEED * 1.4;
     player.vx += (targetVx - player.vx) * 0.3;
     if(tilt < -0.1) player.facing = -1;
     else if(tilt > 0.1) player.facing = 1;
   } else {
+    // Keyboard or mobile touch zones
     if(keys.l) { player.vx = -MOVE_SPEED; player.facing = -1; }
     else if(keys.r) { player.vx = MOVE_SPEED; player.facing = 1; }
-    else player.vx *= 0.75; // friction
+    else player.vx *= 0.75;
   }
 
   // Move X with wrap
@@ -685,18 +683,6 @@ function render() {
   }
 
   ctx.restore();
-
-  // DEBUG: show gyro status on mobile (temporary - remove once working)
-  if(isMobile && running) {
-    ctx.save();
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(0, H - 50, W, 50);
-    ctx.fillStyle = gyroEnabled ? '#4f4' : '#f44';
-    ctx.font = '11px monospace';
-    ctx.fillText('Gyro: ' + (gyroEnabled ? 'ON' : 'OFF') + ' | gamma: ' + gyroGamma.toFixed(1), 8, H - 32);
-    ctx.fillText(gyroDebug, 8, H - 16);
-    ctx.restore();
-  }
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -732,10 +718,6 @@ canvas.addEventListener('mousedown', (e) => {
   const my = (e.clientY - rect.top) * scaleY;
   fireProjectile(mx, my);
 });
-canvas.addEventListener('touchstart', (e) => {
-  // Shooting on touch is handled by the main touch handler below
-  // This handler is for mouse/desktop only
-}, {passive:true});
 
 function fireProjectile(targetX, targetY) {
   const startX = player.x + player.w / 2;
@@ -781,115 +763,114 @@ window.addEventListener('keyup', e => {
   if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') keys.r=false;
 });
 
-// Touch controls - MOBILE: tilt to move, touch to shoot ONLY
+// ── Mobile controls ──
+// PRIMARY: Gyroscope (tilt to move) — requires HTTPS or localhost
+// FALLBACK: Touch left/right side of screen to move
+// TAP = shoot (always)
 let isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 let gyroEnabled = false;
 let gyroGamma = 0;
 let gyroRequested = false;
-let gyroDebug = ''; // Debug info shown on screen
+let secureContext = (window.isSecureContext !== false); // true if secure or unknown
 
 function tryEnableGyro() {
   if(gyroRequested || !isMobile) return;
   gyroRequested = true;
-  gyroDebug = 'Trying sensors...';
 
-  // Check HTTPS (sensors require secure context)
-  if(window.isSecureContext === false) {
-    gyroDebug = 'ERROR: need HTTPS for sensors';
-    return;
-  }
-
-  // iOS 13+ needs explicit user-gesture permission
+  // iOS permission
   if(typeof DeviceOrientationEvent !== 'undefined' &&
      typeof DeviceOrientationEvent.requestPermission === 'function') {
-    gyroDebug = 'iOS: requesting permission...';
     DeviceOrientationEvent.requestPermission().then(r => {
-      if(r === 'granted') {
-        gyroDebug = 'iOS: granted';
-        listenOrientation();
-      } else { gyroDebug = 'iOS: denied'; }
-    }).catch(e => { gyroDebug = 'iOS err: ' + e; });
+      if(r === 'granted') listenSensors();
+    }).catch(()=>{});
     return;
   }
+  listenSensors();
+}
 
-  // === STRATEGY 1: Generic Sensor API (modern Chrome/Brave Android) ===
-  let sensorWorked = false;
+function listenSensors() {
+  // Generic Sensor API (Chrome/Brave Android)
   try {
     if('Accelerometer' in window) {
-      gyroDebug = 'Trying Accelerometer API...';
       const accel = new Accelerometer({frequency: 60});
       accel.addEventListener('reading', () => {
-        if(!sensorWorked) { sensorWorked = true; gyroDebug = 'Accel API OK'; }
         gyroEnabled = true;
-        // x axis: positive = tilt right, negative = tilt left (when facing screen in portrait)
-        // Map from m/s² (gravity ~9.8) to degrees-like value
         gyroGamma = (accel.x / 9.8) * 40;
-      });
-      accel.addEventListener('error', e => {
-        gyroDebug = 'Accel err: ' + (e.error ? e.error.name : e);
       });
       accel.start();
     }
-  } catch(e) { gyroDebug = 'No Accel API: ' + e.message; }
-
-  // === STRATEGY 2: Classic deviceorientation ===
-  try {
-    window.addEventListener('deviceorientation', e => {
-      if(e.gamma === null) return;
-      if(!sensorWorked) gyroDebug = 'Orientation API OK';
-      sensorWorked = true;
-      gyroEnabled = true;
-      const orient = screen.orientation ? screen.orientation.angle : (window.orientation || 0);
-      if(orient === 90) gyroGamma = -e.beta;
-      else if(orient === -90 || orient === 270) gyroGamma = e.beta;
-      else gyroGamma = e.gamma;
-    });
   } catch(e) {}
-
-  // === STRATEGY 3: Classic devicemotion ===
-  try {
-    window.addEventListener('devicemotion', e => {
-      const acc = e.accelerationIncludingGravity;
-      if(!acc || acc.x === null) return;
-      if(!sensorWorked) {
-        sensorWorked = true;
-        gyroDebug = 'Motion API OK';
-      }
-      gyroEnabled = true;
-      if(!window._orientActive) {
-        gyroGamma = -(acc.x / 10) * 30;
-      }
-    });
-    window.addEventListener('deviceorientation', () => { window._orientActive = true; }, {once:true});
-  } catch(e) {}
-
-  // Check after 3 seconds if anything worked
-  setTimeout(() => {
-    if(!gyroEnabled) {
-      gyroDebug = 'No sensor data. Check browser permissions.';
-    }
-  }, 3000);
+  // Classic deviceorientation
+  window.addEventListener('deviceorientation', e => {
+    if(e.gamma === null) return;
+    gyroEnabled = true;
+    const orient = screen.orientation ? screen.orientation.angle : (window.orientation || 0);
+    if(orient === 90) gyroGamma = -e.beta;
+    else if(orient === -90 || orient === 270) gyroGamma = e.beta;
+    else gyroGamma = e.gamma;
+  });
+  // Classic devicemotion
+  window.addEventListener('devicemotion', e => {
+    const acc = e.accelerationIncludingGravity;
+    if(!acc || acc.x === null) return;
+    gyroEnabled = true;
+    gyroGamma = -(acc.x / 10) * 30;
+  });
 }
 
-// MOBILE: touch = ALWAYS shoot (never left/right movement)
+// Touch: multitouch support — one finger can move, another can shoot
+// We track a "move touch" (on left/right edges) and "shoot touch" separately
+let moveTouchId = null;
+let moveDir = 0; // -1 left, 0 none, +1 right
+
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
   initAudio();
   tryEnableGyro();
-  
   if(!running || stunned || dead) return;
-  
-  if(isMobile) {
-    if(e.touches.length >= 1) {
+
+  if(isMobile && gyroEnabled) {
+    // Gyro mode: ALL touches = shoot
+    for(let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
       const rect = canvas.getBoundingClientRect();
       const scaleX = W / rect.width, scaleY = H / rect.height;
-      const tx = (e.touches[0].clientX - rect.left) * scaleX;
-      const ty = (e.touches[0].clientY - rect.top) * scaleY;
+      const tx = (t.clientX - rect.left) * scaleX;
+      const ty = (t.clientY - rect.top) * scaleY;
       fireProjectile(tx, ty);
     }
     return;
   }
-  
+
+  if(isMobile && !gyroEnabled) {
+    // No gyro fallback: tap left/right side = move, tap center = shoot
+    // Left 30% = move left, right 30% = move right, center 40% = shoot
+    for(let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      const rect = canvas.getBoundingClientRect();
+      const relX = (t.clientX - rect.left) / rect.width; // 0..1
+      const scaleX = W / rect.width, scaleY = H / rect.height;
+
+      if(relX < 0.30) {
+        // Left zone: move left
+        moveTouchId = t.identifier;
+        moveDir = -1;
+        keys.l = true; keys.r = false;
+      } else if(relX > 0.70) {
+        // Right zone: move right
+        moveTouchId = t.identifier;
+        moveDir = 1;
+        keys.r = true; keys.l = false;
+      } else {
+        // Center zone: shoot
+        const tx = (t.clientX - rect.left) * scaleX;
+        const ty = (t.clientY - rect.top) * scaleY;
+        fireProjectile(tx, ty);
+      }
+    }
+    return;
+  }
+
   // Desktop touch fallback
   const tx = e.touches[0].clientX;
   const rect = canvas.getBoundingClientRect();
@@ -897,11 +878,23 @@ canvas.addEventListener('touchstart', e => {
   if(tx < mid) { keys.l = true; keys.r = false; }
   else { keys.r = true; keys.l = false; }
 }, {passive:false});
+
 canvas.addEventListener('touchend', e => {
-  if(!isMobile) { keys.l = false; keys.r = false; }
+  for(let i = 0; i < e.changedTouches.length; i++) {
+    if(e.changedTouches[i].identifier === moveTouchId) {
+      moveTouchId = null;
+      moveDir = 0;
+      keys.l = false; keys.r = false;
+    }
+  }
 }, {passive:false});
 
-// Try immediately on load
+canvas.addEventListener('touchcancel', e => {
+  moveTouchId = null; moveDir = 0;
+  keys.l = false; keys.r = false;
+}, {passive:false});
+
+// Try gyro on load
 if(isMobile) { try { tryEnableGyro(); } catch(e) {} }
 
 // Buttons
